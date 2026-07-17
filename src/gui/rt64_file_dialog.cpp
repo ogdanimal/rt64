@@ -6,13 +6,37 @@
 
 #include <cassert>
 
+#if !defined(__ANDROID__)
 #include <nfd.h>
+#endif
 
 namespace RT64 {
     // FileDialog
 
     std::atomic<bool> FileDialog::isOpen = false;
 
+#if defined(__ANDROID__)
+    // On Android there is no native file-browser dialog. ROM/file selection is
+    // handled by the Java Storage Access Framework launcher, which hands the
+    // chosen path to the native side directly. These entry points are therefore
+    // no-ops that return an empty path.
+    void FileDialog::initialize() {}
+    void FileDialog::finish() {}
+
+    std::filesystem::path FileDialog::getDirectoryPath() {
+        return {};
+    }
+
+    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter> &filters) {
+        (void)filters;
+        return {};
+    }
+
+    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter> &filters) {
+        (void)filters;
+        return {};
+    }
+#else
     void FileDialog::initialize() {
         NFD_Init();
     }
@@ -76,4 +100,5 @@ namespace RT64 {
         isOpen = false;
         return path;
     }
+#endif
 };

@@ -312,7 +312,18 @@ namespace RT64 {
         
         const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
         if (createSet) {
-            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
+#       if defined(__ANDROID__)
+            // Adreno's frozen driver sizes a VARIABLE_DESCRIPTOR_COUNT descriptor pool by the
+            // binding's full declared count (UpperRange), not the smaller variable count requested,
+            // so every geometric-growth recreation would allocate a full UpperRange UPDATE_AFTER_BIND
+            // pool and re-write the whole texture cache -- a per-scene-load hitch. Allocate the set
+            // once at full UpperRange capacity so it never regrows; per-frame writes below are still
+            // bounded by the real texture count, so unused slots cost nothing.
+            const uint32_t textureSetCapacity = FramebufferRendererDescriptorTextureSet::UpperRange;
+#       else
+            const uint32_t textureSetCapacity = ((textureCacheSize + 1) * 3) / 2;
+#       endif
+            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, textureSetCapacity);
         }
 
         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {

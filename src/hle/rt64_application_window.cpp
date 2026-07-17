@@ -11,6 +11,8 @@
 #if defined(_WIN32)
 #   include <Windows.h>
 #   include <ShellScalingAPI.h>
+#elif defined(__ANDROID__)
+#   include <android/native_window.h>
 #elif defined(__linux__)
 #   define Status int
 #   if !defined(RT64_SDL_WINDOW_VULKAN)
@@ -103,9 +105,7 @@ namespace RT64 {
         bounds.top = rect.top;
         bounds.width = rect.right - rect.left;
         bounds.height = rect.bottom - rect.top;
-#   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
-#   elif defined(__linux__) || defined(__APPLE__)
+#   elif defined(__ANDROID__) || defined(__linux__) || defined(__APPLE__)
         if (SDL_VideoInit(nullptr) != 0) {
             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
             assert(false && "Failed to init SDL2 video");
@@ -145,10 +145,12 @@ namespace RT64 {
         SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
 #   if defined(_WIN32)
         windowHandle = wmInfo.info.win.window;
+#   elif defined(__ANDROID__)
+        // Plume creates the Vulkan surface directly from the ANativeWindow via
+        // vkCreateAndroidSurfaceKHR, so RenderWindow is an ANativeWindow*.
+        windowHandle = wmInfo.info.android.window;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         windowHandle = sdlWindow;
-#   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
 #   elif defined(__linux__)
         windowHandle.display = wmInfo.info.x11.display;
         windowHandle.window = wmInfo.info.x11.window;
@@ -229,6 +231,9 @@ namespace RT64 {
         fullScreen = newFullScreen;
 #   elif defined(__APPLE__)
         windowWrapper->toggleFullscreen();
+#   elif defined(__ANDROID__)
+        // Android apps are always fullscreen; nothing to toggle.
+        fullScreen = newFullScreen;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         if (newFullScreen) {
             SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -288,6 +293,18 @@ namespace RT64 {
         }
 
         refreshRate = displayMode.refresh_rate;
+#   elif defined(__ANDROID__)
+        // On Android the surface is an ANativeWindow, not an SDL_Window handle,
+        // so query the refresh rate through the SDL window kept in sdlWindow.
+        int displayIndex = (sdlWindow != nullptr) ? SDL_GetWindowDisplayIndex(sdlWindow) : 0;
+        if (displayIndex < 0) {
+            displayIndex = 0;
+        }
+
+        SDL_DisplayMode displayMode = {};
+        if (SDL_GetCurrentDisplayMode(displayIndex, &displayMode) == 0) {
+            refreshRate = displayMode.refresh_rate;
+        }
 #   elif defined(__linux__)
         // Sourced from: https://stackoverflow.com/a/66865623
         XRRScreenResources *screenResources = XRRGetScreenResources(windowHandle.display, windowHandle.window);
@@ -341,6 +358,9 @@ namespace RT64 {
         GetWindowRect(windowHandle, &rect);
         newWindowLeft = rect.left;
         newWindowTop = rect.top;
+#   elif defined(__ANDROID__)
+        // The Android surface is fullscreen and never moves.
+        return false;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
 #   elif defined(__linux__)

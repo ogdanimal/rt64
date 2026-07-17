@@ -501,7 +501,11 @@ namespace RT64 {
                     }
                 }
 
-                skipPresent = skipPresent || ext.swapChain->isEmpty();
+                // When the swap chain is invalid (e.g. Android surface lost on background, where
+                // vkCreateSwapchainKHR returns VK_ERROR_SURFACE_LOST_KHR but leaves a stale non-null
+                // handle so isEmpty() reads false), skipping present avoids threadPresent recreating
+                // framebuffers from already-released image views -> vkCreateFramebuffer SIGSEGV.
+                skipPresent = skipPresent || ext.swapChain->isEmpty() || !swapChainValid;
 
                 Present &present = presents[processCursor];
                 ext.workloadQueue->waitForWorkloadId(present.workloadId);

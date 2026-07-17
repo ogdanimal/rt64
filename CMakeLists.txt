@@ -55,7 +55,11 @@ elseif (APPLE)
         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/arm64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/arm64/spirv-cross")
     endif()
 else()
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    # DXC is a build-time host tool that compiles HLSL to SPIR-V, so it must
+    # match the HOST architecture, not the target. When cross-compiling (e.g.
+    # for Android), CMAKE_SYSTEM_PROCESSOR is the target arch (aarch64), so key
+    # the selection off CMAKE_HOST_SYSTEM_PROCESSOR instead.
+    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "AMD64")
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
     else()
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
@@ -66,9 +70,36 @@ set(ZSTD_LEGACY_SUPPORT OFF)
 set(ZSTD_BUILD_STATIC ON)
 set(ZSTD_BUILD_SHARED OFF)
 
-add_subdirectory(src/tools/file_to_c)
+# file_to_c is a build-time host tool (embeds shader blobs into C arrays). When
+# cross-compiling for Android, building it with the NDK would produce an arm64
+# binary that cannot run on the build host, so instead use a prebuilt host
+# binary supplied via -DRT64_FILE_TO_C=/path/to/file_to_c.
+if (ANDROID)
+    if (NOT RT64_FILE_TO_C)
+        message(FATAL_ERROR "Cross-compiling for Android requires -DRT64_FILE_TO_C pointing at a host-built file_to_c binary.")
+    endif()
+    set(FILE_TO_C "${RT64_FILE_TO_C}")
+    set(FILE_TO_C_DEP "${RT64_FILE_TO_C}")
+else()
+    add_subdirectory(src/tools/file_to_c)
+    set(FILE_TO_C file_to_c)
+    set(FILE_TO_C_DEP file_to_c)
+endif()
 add_subdirectory(src/contrib/re-spirv)
-add_subdirectory(src/contrib/nativefiledialog-extended)
+# nativefiledialog-extended is a desktop-only native file browser (GTK/Win32/Cocoa).
+# On Android, ROM selection is handled by the Java SAF launcher, so it is excluded.
+if (NOT ANDROID)
+    add_subdirectory(src/contrib/nativefiledialog-extended)
+endif()
+# zstd's dictBuilder uses qsort_r, which Android Bionic does not expose until
+# API 36. RT64 only needs zstd for runtime decompression (texture packs), so the
+# dictionary builder is disabled on Android. The zstd CLI (programs/) links
+# against the dictbuilder symbols and is a host-only tool we never ship, so it
+# is disabled too, otherwise a full `--build` fails at link time.
+if (ANDROID)
+    set(ZSTD_BUILD_DICTBUILDER OFF CACHE BOOL "" FORCE)
+    set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(src/contrib/zstd/build/cmake)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
@@ -110,13 +141,52 @@ set (DXC_CS_OPTS "${DXC_COMMON_OPTS}" "-E" "CSMain" "-T cs_6_3")
 set (DXC_GS_OPTS "${DXC_COMMON_OPTS}" "-E" "GSMain" "-T gs_6_3")
 set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-target-env=vulkan1.1spirv1.4" "-fspv-extension=SPV_KHR_ray_tracing" "-fspv-extension=SPV_EXT_descriptor_indexing")
 
+# Adreno 6xx compatibility: the Qualcomm Vulkan compiler (driver 0746, frozen
+# 2023) fails to link a compute shader that still contains a non-inlined
+# OpFunctionCall ("Failed to link shaders" / VK_ERROR_UNKNOWN from
+# vkCreateComputePipelines), even though the SPIR-V is valid and links on desktop
+# drivers. The framebuffer compute shaders are compiled at -O0 (a load-bearing
+# workaround for a separate DXC codegen bug in EndianSwapUINT*), which leaves real
+# helper calls un-inlined. We therefore run a uniform spirv-opt inline pass over
+# every compute shader after DXC and validate the result in the same rule, so a
+# bad pass interaction can never ship silently. The pass is a no-op on shaders DXC
+# already fully inlined, costs milliseconds, and regression-proofs any helper
+# function added to a compute shader later. Only wired on Android (the affected
+# target); desktop keeps DXC output verbatim.
+if (ANDROID)
+    file(GLOB RT64_SHADER_TOOLS_DIRS "${ANDROID_NDK}/shader-tools/*")
+    find_program(SPIRV_OPT NAMES spirv-opt HINTS ${RT64_SHADER_TOOLS_DIRS} REQUIRED)
+    find_program(SPIRV_VAL NAMES spirv-val HINTS ${RT64_SHADER_TOOLS_DIRS} REQUIRED)
+    message(STATUS "RT64 Adreno compute-shader inline pass: ${SPIRV_OPT}")
+    # --skip-block-layout applies to spirv-opt's built-in input-validation pass;
+    # see the spirv-val note in build_shader_spirv_impl for why the DX layout is
+    # relaxed. spirv-opt otherwise rejects the -fvk-use-dx-layout StructuredBuffers.
+    set(RT64_SPIRV_INLINE_PASSES --skip-block-layout --eliminate-dead-branches --merge-return --inline-entry-points-exhaustive --eliminate-dead-functions)
+endif()
+
 function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.spv
         COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
         DEPENDS ${FILENAME})
+    # RT64_SPIRV_POST_OPT is set by build_compute_shader (CMake dynamic scoping
+    # makes it visible here). See the Adreno 6xx note above.
+    if (ANDROID AND RT64_SPIRV_POST_OPT)
+        # --skip-block-layout: these shaders are compiled with -fvk-use-dx-layout
+        # (DX-style struct packing), which intentionally diverges from Vulkan's
+        # standard block-layout rules; RT64 declares matching descriptor layouts and
+        # they run correctly on-device. spirv-val here is a guard that the inline
+        # pass did not corrupt the module, not a re-check of the layout contract.
+        add_custom_command(OUTPUT ${OUTNAME}.opt.spv
+            COMMAND ${SPIRV_OPT} ${RT64_SPIRV_INLINE_PASSES} ${OUTNAME}.spv -o ${OUTNAME}.opt.spv
+            COMMAND ${SPIRV_VAL} --target-env vulkan1.0 --skip-block-layout ${OUTNAME}.opt.spv
+            DEPENDS ${OUTNAME}.spv)
+        set(RT64_SPIRV_BLOB ${OUTNAME}.opt.spv)
+    else()
+        set(RT64_SPIRV_BLOB ${OUTNAME}.spv)
+    endif()
     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
-        COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
-        DEPENDS ${OUTNAME}.spv file_to_c
+        COMMAND ${FILE_TO_C} ${RT64_SPIRV_BLOB} ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+        DEPENDS ${RT64_SPIRV_BLOB} ${FILE_TO_C_DEP}
         BYPRODUCTS ${OUTNAME}.spirv.h)
     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.spirv.c)
 endfunction()
@@ -126,8 +196,8 @@ function(build_shader_dxil_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
         COMMAND ${DXC} ${DXC_DXIL_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.dxil
         DEPENDS ${FILENAME})
     add_custom_command(OUTPUT ${OUTNAME}.dxil.c
-        COMMAND file_to_c ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
-        DEPENDS ${OUTNAME}.dxil file_to_c
+        COMMAND ${FILE_TO_C} ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
+        DEPENDS ${OUTNAME}.dxil ${FILE_TO_C_DEP}
         BYPRODUCTS ${OUTNAME}.dxil.h)
     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.dxil.c)
 endfunction()
@@ -146,8 +216,8 @@ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
             COMMAND xcrun -sdk macosx metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
             DEPENDS ${OUTNAME}.ir)
     add_custom_command(OUTPUT ${OUTNAME}.metal.c
-            COMMAND file_to_c ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
-            DEPENDS ${OUTNAME}.metallib file_to_c
+            COMMAND ${FILE_TO_C} ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
+            DEPENDS ${OUTNAME}.metallib ${FILE_TO_C_DEP}
             BYPRODUCTS ${OUTNAME}.metal.h)
     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.metal.c)
 endfunction()
@@ -240,8 +310,8 @@ function(preprocess_shader TARGETOBJ SHADERNAME)
     cmake_path(GET OUTNAME PARENT_PATH OUTPUT_DIR)
     preprocess(${FILENAME} ${OUTNAME}.rw ${DXC_COMMON_OPTS})
     add_custom_command(OUTPUT ${OUTNAME}.rw.c
-        COMMAND file_to_c ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
-        DEPENDS ${OUTNAME}.rw file_to_c
+        COMMAND ${FILE_TO_C} ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
+        DEPENDS ${OUTNAME}.rw ${FILE_TO_C_DEP}
         BYPRODUCTS ${OUTNAME}.rw.h)
     file(MAKE_DIRECTORY ${OUTPUT_DIR})
     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.rw.c)
@@ -274,6 +344,9 @@ function(build_vertex_shader_spec_constants TARGETOBJ SHADERNAME)
 endfunction()
 
 function(build_compute_shader TARGETOBJ SHADERNAME)
+    # Enable the Adreno 6xx force-inline + validate pass for compute shaders only
+    # (see build_shader_spirv_impl). Raster/RT shaders link fine unmodified.
+    set(RT64_SPIRV_POST_OPT TRUE)
     build_shader(${TARGETOBJ} ${SHADERNAME} "${DXC_CS_OPTS}" ${ARGN})
 endfunction()
 
@@ -286,6 +359,22 @@ if (WIN32)
     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
     set(SDL2_LIBRARIES "SDL2" "SDL2main")
     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+elseif(ANDROID)
+    # Android has no system SDL2; fetch and build it as part of the NDK build.
+    # SDL2's Android backend supplies the ANativeWindow (via SDLActivity) and
+    # handles input/audio. Plume still creates the Vulkan surface natively from
+    # the ANativeWindow (vkCreateAndroidSurfaceKHR), so PLUME_SDL_VULKAN_ENABLED
+    # stays off here.
+    include(FetchContent)
+    FetchContent_Declare(
+        SDL2
+        GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
+        GIT_TAG release-2.32.8
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(SDL2)
+    set(SDL2_INCLUDE_DIRS "${SDL2_SOURCE_DIR}/include")
+    set(SDL2_LIBRARIES SDL2)
 else()
     find_package(SDL2 REQUIRED)
 endif()
@@ -419,8 +508,11 @@ include_directories(
     "${PROJECT_SOURCE_DIR}/src/contrib/imgui"
     "${PROJECT_SOURCE_DIR}/src/contrib/hlslpp/include"
     "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-core/src/api"
-    "${PROJECT_SOURCE_DIR}/src/contrib/nativefiledialog-extended/src/include"
 )
+
+if (NOT ANDROID)
+    include_directories("${PROJECT_SOURCE_DIR}/src/contrib/nativefiledialog-extended/src/include")
+endif()
 
 if (WIN32)
     # DXC only needs to be included during runtime for Windows.
@@ -438,7 +530,9 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
 
 # Add common libraries.
 target_link_libraries(rt64 re-spirv)
-target_link_libraries(rt64 nfd)
+if (NOT ANDROID)
+    target_link_libraries(rt64 nfd)
+endif()
 target_link_libraries(rt64 libzstd_static)
 target_link_libraries(rt64 plume)
 

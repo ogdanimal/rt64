@@ -8,7 +8,17 @@
 #include "Formats.hlsli"
 
 uint EndianSwapUINT16(uint i) {
-    return ((i << 8) & 0xFF00) | ((i >> 8) & 0xFF);
+    // Adreno 6xx compatibility: the Qualcomm Vulkan compiler (driver 0746, frozen
+    // 2023) fails to link a compute shader containing the OR-of-two-shifted-and-
+    // -masked pattern `((i << 8) & 0xFF00) | ((i >> 8) & 0xFF)` ("Failed to link
+    // shaders" / VK_ERROR_UNKNOWN from vkCreateComputePipelines), even though the
+    // SPIR-V is valid and links on desktop drivers. Masking a single time after
+    // the OR lowers cleanly. The input is pre-masked to 16 bits first so this stays
+    // bit-for-bit equivalent to the original for arbitrary input (the plain
+    // `(i << 8 | i >> 8) & 0xFFFF` would leak input bits 16-23 through the i >> 8
+    // term). FloatToDepth16, the only caller, already produces a <= 16-bit value.
+    i &= 0xFFFFu;
+    return (i << 8 | i >> 8) & 0xFFFFu;
 }
 
 // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 
