@@ -13,6 +13,7 @@
 #include "implot/implot.h"
 
 #include "common/rt64_elapsed_timer.h"
+#include "common/rt64_g64_prof.h"
 #include "common/rt64_math.h"
 #include "common/rt64_tmem_hasher.h"
 #include "preset/rt64_preset_draw_call.h"
@@ -1235,6 +1236,15 @@ namespace RT64 {
                 resizedTargets.clear();
             };
 
+#       if RT64_PROFILE_LOGCAT
+            // Split accumulators for the per-pair sync path (captured by the lambda below).
+            // g64WaitMs = GPU fence: submit + the GPU actually executing the pair, drained by wait().
+            // g64CopyMs = CPU-side copyNativeToRAM memcpy of the rendered pair back into RDRAM.
+            // g64UploadMs = waitForUploaders(): blocking on the texture-uploader threads.
+            // Their sum accounts for pairSync; any remainder is CPU command-list building.
+            double g64WaitMs = 0.0, g64CopyMs = 0.0, g64UploadMs = 0.0;
+            ElapsedTimer g64SplitTimer;
+#       endif
             auto renderAndSynchronize = [&](uint32_t maxFramebufferPair) {
                 // Preprocess all the framebuffer operations.
                 uint32_t pairCursor = framebufferPairCursor;
@@ -1441,9 +1451,22 @@ namespace RT64 {
                 }
 
                 ext.framebufferGraphicsWorker->commandList->end();
+#       if RT64_PROFILE_LOGCAT
+                g64SplitTimer.reset();
                 framebufferRenderer->waitForUploaders();
+                g64UploadMs += g64SplitTimer.elapsedMilliseconds();
+#       else
+                framebufferRenderer->waitForUploaders();
+#       endif
                 ext.framebufferGraphicsWorker->execute();
+#       if RT64_PROFILE_LOGCAT
+                g64SplitTimer.reset();
                 ext.framebufferGraphicsWorker->wait();
+                g64WaitMs += g64SplitTimer.elapsedMilliseconds();
+                g64SplitTimer.reset();
+#       else
+                ext.framebufferGraphicsWorker->wait();
+#       endif
 
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
@@ -1457,6 +1480,9 @@ namespace RT64 {
 
                     pairCursor++;
                 }
+#       if RT64_PROFILE_LOGCAT
+                g64CopyMs += g64SplitTimer.elapsedMilliseconds();
+#       endif
 
                 framebufferPairCursor = maxFramebufferPair;
             };
@@ -1513,9 +1539,24 @@ namespace RT64 {
             // Perform any preliminar setup before processing the framebuffer pairs.
             renderSetup();
 
+#       if RT64_PROFILE_LOGCAT
+            // Per-frame accumulators for the copyWithGPU=false per-fb-pair sync measurement.
+            // g64SyncMs times the WHOLE renderAndSynchronize call (submit + GPU exec + fence +
+            // CPU copyNativeToRAM), not just the fence — hence "pairSync", not "fenceWait".
+            ElapsedTimer g64SyncTimer;
+            uint32_t g64SyncCount = 0;    // fences actually taken (= forced (f>0) when copies off)
+            uint32_t g64NaturalCount = 0; // pairs with a REAL dependency before the forced override
+            double g64SyncMs = 0.0;
+#       endif
             // Start loading tiles, sampling tiles and drawing the framebuffer pairs as required.
             for (uint32_t f = 0; f < workload.fbPairCount; f++) {
                 FramebufferPair &fbPair = workload.fbPairs[f];
+#       if RT64_PROFILE_LOGCAT
+                // Capture the natural dependency (from rt64_rdp.cpp:151 / rt64_state.cpp:558 / :1012)
+                // BEFORE the copyWithGPU=false override below blanket-forces it to (f>0). The gap
+                // between naturalFences and fences sizes a precise-barrier fix that keeps copies off.
+                if (fbPair.syncRequired) g64NaturalCount++;
+#       endif
                 const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
 #       if SYNC_ON_EVERY_FB_PAIR == 0
                 if (!gpuCopiesEnabled)
@@ -1525,7 +1566,14 @@ namespace RT64 {
                 }
 
                 if (fbPair.syncRequired) {
+#       if RT64_PROFILE_LOGCAT
+                    g64SyncTimer.reset();
                     renderAndSynchronize(f);
+                    g64SyncMs += g64SyncTimer.elapsedMilliseconds();
+                    g64SyncCount++;
+#       else
+                    renderAndSynchronize(f);
+#       endif
                     renderSetup();
                 }
 
@@ -1533,7 +1581,53 @@ namespace RT64 {
             }
 
             // Render any remaining batches of framebuffers.
+#       if RT64_PROFILE_LOGCAT
+            g64SyncTimer.reset();
             renderAndSynchronize(workload.fbPairCount);
+            g64SyncMs += g64SyncTimer.elapsedMilliseconds();
+            g64SyncCount++;
+            {
+                // DECISIVE TEST for the menu-slowdown diagnosis: with copyWithGPU=false,
+                // rt64 does one blocking submit+fence per framebuffer pair (see rt64_render_context.cpp:356).
+                // pairSync/frame is the TOTAL cost of the serialized readback path; the gpuWait and
+                // cpuCopy split says which term dominates (fix differs: fewer fences vs faster copy).
+                // If pairSync/frame approaches the frame period, this path IS the bottleneck.
+                // A high pairs/frame here (vs gameplay) is what makes menus specifically expensive.
+                // Note: the final renderAndSynchronize always counts as one sync even if nothing was
+                // left to flush, so fences/frame carries a consistent +~1 bias. Ignore the first ~2s
+                // of loglines while the profiler rings on the render line warm up.
+                static ElapsedTimer g64LogTimer;
+                static uint32_t g64Frames = 0, g64Fences = 0, g64Natural = 0, g64Pairs = 0;
+                static double g64AccumSyncMs = 0.0, g64AccumWaitMs = 0.0, g64AccumCopyMs = 0.0, g64AccumUploadMs = 0.0;
+                g64Frames++;
+                g64Fences += g64SyncCount;
+                g64Natural += g64NaturalCount;
+                g64Pairs += workload.fbPairCount;
+                g64AccumSyncMs += g64SyncMs;
+                g64AccumWaitMs += g64WaitMs;
+                g64AccumCopyMs += g64CopyMs;
+                g64AccumUploadMs += g64UploadMs;
+                const double g64Secs = g64LogTimer.elapsedSeconds();
+                if (g64Secs >= 1.0) {
+                    fprintf(stderr, "[g64prof] fullSync %.1f/s  pairs/frame=%.1f  fences/frame=%.1f  naturalFences/frame=%.1f  pairSync=%.2fms/frame (gpuWait=%.2f cpuCopy=%.2f uploadWait=%.2f)  copyWithGPU=%d\n",
+                        g64Frames / g64Secs,
+                        double(g64Pairs) / g64Frames,
+                        double(g64Fences) / g64Frames,
+                        double(g64Natural) / g64Frames,
+                        g64AccumSyncMs / g64Frames,
+                        g64AccumWaitMs / g64Frames,
+                        g64AccumCopyMs / g64Frames,
+                        g64AccumUploadMs / g64Frames,
+                        ext.emulatorConfig->framebuffer.copyWithGPU ? 1 : 0);
+                    fflush(stderr);
+                    g64Frames = g64Fences = g64Natural = g64Pairs = 0;
+                    g64AccumSyncMs = g64AccumWaitMs = g64AccumCopyMs = g64AccumUploadMs = 0.0;
+                    g64LogTimer.reset();
+                }
+            }
+#       else
+            renderAndSynchronize(workload.fbPairCount);
+#       endif
         }
         else {
             // Process all tiles.

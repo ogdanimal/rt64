@@ -8,6 +8,8 @@
 
 #include "rt64_present_queue.h"
 
+#include "common/rt64_g64_prof.h"
+
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 namespace RT64 {
@@ -861,6 +863,33 @@ namespace RT64 {
         rendererCPUProfiler.end();
         rendererCPUProfiler.log();
         rendererCPUProfiler.reset();
+
+#       if RT64_PROFILE_LOGCAT
+        {
+            // Context for the fullSync sync measurement: present cadence (= actual on-screen FPS,
+            // cross-checks the 12 fps from SurfaceFlinger) plus the real GPU time per frame from
+            // rt64's existing timestamp query pool. Separates "blocked on fences" from "GPU is slow".
+            // GPU= is already milliseconds: plume's queryResults() scales raw ticks by timestampPeriod
+            // (plume_vulkan.cpp:2865) before the /1e6 at rt64_workload_queue.cpp:850.
+            // presentProfiler.average() is read here on the workload thread while the present thread
+            // writes the ring: an unsynchronized read, deliberately unlocked. A torn double is
+            // harmless for a diagnostic average — do NOT copy this pattern into non-diagnostic code.
+            static ElapsedTimer g64LogTimer;
+            static uint32_t g64Frames = 0;
+            g64Frames++;
+            const double g64Secs = g64LogTimer.elapsedSeconds();
+            if (g64Secs >= 1.0) {
+                const double presentMs = (ext.presentQueue != nullptr) ? ext.presentQueue->presentProfiler.average() : 0.0;
+                fprintf(stderr, "[g64prof] render present=%.2fms (%.1f fps)  rendererCPU=%.2fms  GPU=%.2fms  workload=%.2fms  match=%.2fms\n",
+                    presentMs, (presentMs > 0.0 ? 1000.0 / presentMs : 0.0),
+                    rendererCPUProfiler.average(), rendererGPUProfiler.average(),
+                    workloadProfiler.average(), matchingProfiler.average());
+                fflush(stderr);
+                g64Frames = 0;
+                g64LogTimer.reset();
+            }
+        }
+#       endif
 #   endif
     }
 
