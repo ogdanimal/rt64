@@ -390,6 +390,19 @@ namespace RT64 {
     bool FramebufferManager::makeFramebufferTile(Framebuffer *fb, uint32_t addressStart, uint32_t addressEnd, uint32_t lineWidth, uint32_t tileHeight, FramebufferTile &outTile, bool RGBA32) {
         assert(fb != nullptr);
 
+#   if RT64_PROFILE_LOGCAT
+        // DIAG (menu-framerate): trace why tile copies are accepted/declined, so the copies-on
+        // naturalFences=18 (6 scratch reads declined) can be explained. Filter with grep g64tile.
+        const uint32_t g64OrigStart = addressStart;
+        auto g64TileLog = [&](const char *tag) {
+            fprintf(stderr, "[g64tile] %-16s fb=%08X..%08X w=%u siz=%u lastFmt=%u load=%08X..%08X lineW=%u tileH=%u RGBA32=%d\n",
+                tag, fb->addressStart, fb->addressEnd, fb->width, fb->siz, fb->lastWriteFmt,
+                g64OrigStart, addressEnd, lineWidth, tileHeight, RGBA32 ? 1 : 0);
+        };
+#   else
+        auto g64TileLog = [](const char *) {};
+#   endif
+
         // We need to figure out the best fitting tile from the address range specified and the TMEM Regions this tile must be stored on.
         // The tile width and height parameters won't be 0 on load tile operations. They will however be 0 on load block operations.
 
@@ -403,12 +416,14 @@ namespace RT64 {
 
         // We went over the allowed address range, a tile copy is impossible.
         if (addressStart >= fb->addressEnd) {
+            g64TileLog("DECL:past-end");
             return false;
         }
 
         // Disallow the tile copy if the end address ended up below the starting address.
         const uint32_t minEndAddress = std::min(addressEnd, fb->addressEnd);
         if (minEndAddress <= addressStart) {
+            g64TileLog("DECL:end<=start");
             return false;
         }
 
@@ -425,6 +440,7 @@ namespace RT64 {
 
         // The offset is not aligned to the pixel size. It's not possible to make a direct copy.
         if ((offset % pixelSize) != 0) {
+            g64TileLog("DECL:offset-misalign");
             return false;
         }
 
@@ -460,6 +476,7 @@ namespace RT64 {
             const bool multipleRows = (rowEnd > 1);
             const bool misalignedRow = (rowOffset > 0);
             if (fromLoadBlock && multipleRows && misalignedRow) {
+                g64TileLog("DECL:loadblk-misalign");
                 return false;
             }
         }
@@ -472,6 +489,7 @@ namespace RT64 {
 
         // Invalid tile.
         if ((outTile.bottom <= outTile.top) || (outTile.right <= outTile.left)) {
+            g64TileLog("DECL:degenerate");
             return false;
         }
 
@@ -482,6 +500,7 @@ namespace RT64 {
         outTile.fmt = fb->lastWriteFmt;
         outTile.ditherPattern = fb->bestDitherPattern();
 
+        g64TileLog("ACCEPT");
         return true;
     }
 
