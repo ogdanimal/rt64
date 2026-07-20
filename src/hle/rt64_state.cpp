@@ -1547,9 +1547,22 @@ namespace RT64 {
             uint32_t g64SyncCount = 0;    // fences actually taken (= forced (f>0) when copies off)
             uint32_t g64NaturalCount = 0; // pairs with a REAL dependency before the forced override
             double g64SyncMs = 0.0;
-            // Per-pair identity dump for THIS frame; printed once/sec alongside the summary
-            // line so we can see WHICH 20 pairs exist and why each boundary was created.
-            std::string g64FrameDump;
+            // Per-pair identity + timing record for THIS frame; printed once/sec alongside the
+            // summary line so we can see WHICH 20 pairs exist, why each boundary was created, AND
+            // how long each pair's blocking renderAndSynchronize (submit+GPU exec+fence+copy) took.
+            // The syncMs-vs-calls correlation answers the [HELD] fixed-latency-vs-compute question
+            // (menu-framerate handover §4 #2 / claim #13): if every fence costs ~equal regardless of
+            // the pair's draw count, the 46ms is fixed submit/fence latency; if syncMs scales with
+            // calls, it is GPU compute. Identity is captured at loop-top (before the (f>0) override);
+            // syncMs is filled in after the pair is actually synced, hence the deferred format.
+            struct G64PairRec {
+                uint32_t f, color, fmt, siz, w, depth, calls;
+                int fillRect, natural;
+                const char *flush;
+                double syncMs; // -1.0 = this pair was not synced (no fence taken)
+            };
+            std::vector<G64PairRec> g64PairRecs;
+            g64PairRecs.reserve(workload.fbPairCount);
 #       endif
             // Start loading tiles, sampling tiles and drawing the framebuffer pairs as required.
             for (uint32_t f = 0; f < workload.fbPairCount; f++) {
@@ -1572,13 +1585,11 @@ namespace RT64 {
                         default:                                                    return "?";
                         }
                     };
-                    char g64Line[256];
-                    snprintf(g64Line, sizeof(g64Line),
-                        "  pair[%2u] color=%08X fmt=%u siz=%u w=%u depth=%08X calls=%u fillRect=%d natural=%d flush=%s\n",
+                    g64PairRecs.push_back(G64PairRec{
                         f, fbPair.colorImage.address, fbPair.colorImage.fmt, fbPair.colorImage.siz,
                         fbPair.colorImage.width, fbPair.depthImage.address, fbPair.gameCallCount,
-                        fbPair.fillRectOnly ? 1 : 0, fbPair.syncRequired ? 1 : 0, g64Reason(fbPair.flushReason));
-                    g64FrameDump += g64Line;
+                        fbPair.fillRectOnly ? 1 : 0, fbPair.syncRequired ? 1 : 0,
+                        g64Reason(fbPair.flushReason), -1.0 });
                 }
 #       endif
                 const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
@@ -1593,8 +1604,13 @@ namespace RT64 {
 #       if RT64_PROFILE_LOGCAT
                     g64SyncTimer.reset();
                     renderAndSynchronize(f);
-                    g64SyncMs += g64SyncTimer.elapsedMilliseconds();
+                    const double g64ThisPairMs = g64SyncTimer.elapsedMilliseconds();
+                    g64SyncMs += g64ThisPairMs;
                     g64SyncCount++;
+                    // Attribute this pair's blocking cost to its record (pushed at loop-top for THIS f).
+                    if (!g64PairRecs.empty() && g64PairRecs.back().f == f) {
+                        g64PairRecs.back().syncMs = g64ThisPairMs;
+                    }
 #       else
                     renderAndSynchronize(f);
 #       endif
@@ -1643,8 +1659,26 @@ namespace RT64 {
                         g64AccumCopyMs / g64Frames,
                         g64AccumUploadMs / g64Frames,
                         ext.emulatorConfig->framebuffer.copyWithGPU ? 1 : 0);
-                    fprintf(stderr, "[g64prof] pair enumeration (one representative frame, %u pairs):\n%s",
-                        workload.fbPairCount, g64FrameDump.c_str());
+                    // Per-pair enumeration WITH per-pair blocking sync time. syncMs<0 = pair not synced
+                    // (no fence). Read the syncMs column against calls: flat syncMs across wildly different
+                    // call counts => fixed submit/fence latency (46ms is compute-independent); syncMs that
+                    // tracks calls => GPU compute. This is the decisive per-fence measurement for [HELD] #13.
+                    {
+                        std::string g64FrameDump;
+                        char g64Line[256];
+                        for (const G64PairRec &r : g64PairRecs) {
+                            if (r.syncMs >= 0.0) {
+                                snprintf(g64Line, sizeof(g64Line), "  pair[%2u] sync=%6.2fms  calls=%-4u color=%08X fmt=%u siz=%u w=%u depth=%08X fillRect=%d natural=%d flush=%s\n",
+                                    r.f, r.syncMs, r.calls, r.color, r.fmt, r.siz, r.w, r.depth, r.fillRect, r.natural, r.flush);
+                            } else {
+                                snprintf(g64Line, sizeof(g64Line), "  pair[%2u] sync=  --   calls=%-4u color=%08X fmt=%u siz=%u w=%u depth=%08X fillRect=%d natural=%d flush=%s\n",
+                                    r.f, r.calls, r.color, r.fmt, r.siz, r.w, r.depth, r.fillRect, r.natural, r.flush);
+                            }
+                            g64FrameDump += g64Line;
+                        }
+                        fprintf(stderr, "[g64prof] pair enumeration (one representative frame, %u pairs):\n%s",
+                            workload.fbPairCount, g64FrameDump.c_str());
+                    }
                     fflush(stderr);
                     g64Frames = g64Fences = g64Natural = g64Pairs = 0;
                     g64AccumSyncMs = g64AccumWaitMs = g64AccumCopyMs = g64AccumUploadMs = 0.0;
