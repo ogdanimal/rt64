@@ -1547,6 +1547,9 @@ namespace RT64 {
             uint32_t g64SyncCount = 0;    // fences actually taken (= forced (f>0) when copies off)
             uint32_t g64NaturalCount = 0; // pairs with a REAL dependency before the forced override
             double g64SyncMs = 0.0;
+            // Per-pair identity dump for THIS frame; printed once/sec alongside the summary
+            // line so we can see WHICH 20 pairs exist and why each boundary was created.
+            std::string g64FrameDump;
 #       endif
             // Start loading tiles, sampling tiles and drawing the framebuffer pairs as required.
             for (uint32_t f = 0; f < workload.fbPairCount; f++) {
@@ -1556,6 +1559,27 @@ namespace RT64 {
                 // BEFORE the copyWithGPU=false override below blanket-forces it to (f>0). The gap
                 // between naturalFences and fences sizes a precise-barrier fix that keeps copies off.
                 if (fbPair.syncRequired) g64NaturalCount++;
+                {
+                    // fbPair.syncRequired is still the NATURAL value here (before the (f>0) override below).
+                    auto g64Reason = [](FramebufferPair::FlushReason r) -> const char* {
+                        switch (r) {
+                        case FramebufferPair::FlushReason::None:                    return "None";
+                        case FramebufferPair::FlushReason::SamplingFromColorImage:  return "SampleColor";
+                        case FramebufferPair::FlushReason::SamplingFromDepthImage:  return "SampleDepth";
+                        case FramebufferPair::FlushReason::ColorImageChanged:       return "ColorChanged";
+                        case FramebufferPair::FlushReason::DepthImageChanged:       return "DepthChanged";
+                        case FramebufferPair::FlushReason::ProcessDisplayListsEnd:  return "DLEnd";
+                        default:                                                    return "?";
+                        }
+                    };
+                    char g64Line[256];
+                    snprintf(g64Line, sizeof(g64Line),
+                        "  pair[%2u] color=%08X fmt=%u siz=%u w=%u depth=%08X calls=%u fillRect=%d natural=%d flush=%s\n",
+                        f, fbPair.colorImage.address, fbPair.colorImage.fmt, fbPair.colorImage.siz,
+                        fbPair.colorImage.width, fbPair.depthImage.address, fbPair.gameCallCount,
+                        fbPair.fillRectOnly ? 1 : 0, fbPair.syncRequired ? 1 : 0, g64Reason(fbPair.flushReason));
+                    g64FrameDump += g64Line;
+                }
 #       endif
                 const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
 #       if SYNC_ON_EVERY_FB_PAIR == 0
@@ -1619,6 +1643,8 @@ namespace RT64 {
                         g64AccumCopyMs / g64Frames,
                         g64AccumUploadMs / g64Frames,
                         ext.emulatorConfig->framebuffer.copyWithGPU ? 1 : 0);
+                    fprintf(stderr, "[g64prof] pair enumeration (one representative frame, %u pairs):\n%s",
+                        workload.fbPairCount, g64FrameDump.c_str());
                     fflush(stderr);
                     g64Frames = g64Fences = g64Natural = g64Pairs = 0;
                     g64AccumSyncMs = g64AccumWaitMs = g64AccumCopyMs = g64AccumUploadMs = 0.0;
