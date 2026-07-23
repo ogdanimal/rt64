@@ -258,7 +258,18 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), 0.5f);
     }
 #endif
-    
+
+#ifdef NO_DUAL_SRC_BLEND
+    // Fallback for devices without dual source blending (e.g. every Mali GPU). There is only
+    // one output, so the blending factor has to travel in its alpha and the pipeline blends
+    // with SRC_ALPHA/INV_SRC_ALPHA instead of the SRC1 factors. That costs us the coverage
+    // value the primary output would otherwise carry, so coverage written to the framebuffer
+    // is wrong for alpha blended draws. Keep this in sync with RasterShader::createPipeline.
+    if (alphaBlend) {
+        resultColor.a = resultAlpha.a;
+    }
+#endif
+
     return true;
 }
 
@@ -283,7 +294,9 @@ void PSMain(
     , bool isFrontFace : SV_IsFrontFace
 #endif
     , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
+#if !defined(NO_DUAL_SRC_BLEND)
     , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
+#endif
 )
 {
 #if !defined(DYNAMIC_RENDER_PARAMS)
@@ -300,6 +313,8 @@ void PSMain(
     }
 
     pixelColor = resultColor;
+#if !defined(NO_DUAL_SRC_BLEND)
     pixelAlpha = resultAlpha;
+#endif
 }
 #endif

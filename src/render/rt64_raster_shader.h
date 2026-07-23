@@ -36,6 +36,12 @@ namespace RT64 {
         respv::Shader rasterPSFlat;
         respv::Shader rasterPSFlatMS;
 
+        // Variants for devices without the dualSrcBlend feature. See RasterShader::createPipeline.
+        respv::Shader rasterPSNoDualSrc;
+        respv::Shader rasterPSMSNoDualSrc;
+        respv::Shader rasterPSFlatNoDualSrc;
+        respv::Shader rasterPSFlatMSNoDualSrc;
+
         void initialize();
     };
 
