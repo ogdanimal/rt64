@@ -16,6 +16,24 @@
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_worker.h"
 
+// Issue #15 follow-up diagnostic: does this game ever issue coverage wrap draws?
+//
+// The single source blending fallback carries the blend factor in the primary
+// output's alpha, so it loses the coverage value that would otherwise be there.
+// The worst case is a cvgAdd draw, where dstBlendAlpha = ONE accumulates that
+// alpha and coverage wrap emulation ends up accumulating the blend factor.
+// Whether the case is reachable AT ALL is a property of the game's display
+// lists, not of the GPU, so it can be measured on any device and any backend --
+// no Mali hardware needed to answer it.
+//
+// Set to 1 in a local build only. Never commit it enabled.
+#define RT64_DIAG_CVG_ADD 0
+
+#if RT64_DIAG_CVG_ADD
+#   include <atomic>
+#   include "shared/rt64_blender.h"
+#endif
+
 // TODO: Move to shared.
 
 namespace interop {
@@ -1651,6 +1669,43 @@ namespace RT64 {
 #               endif
                     {
                         triangles.shaderDesc = call.shaderDesc;
+
+#                   if RT64_DIAG_CVG_ADD
+                        {
+                            // Counted here rather than at pipeline creation so it reflects DRAWS, not
+                            // unique shader descriptions -- a mode used by one draw per frame and one
+                            // used by thousands are very different answers to "is this reachable".
+                            const interop::OtherMode diagOtherMode = call.shaderDesc.otherMode;
+                            const bool diagCopyMode = (diagOtherMode.cycleType() == G_CYC_COPY);
+                            const bool diagAlphaBlend = !diagCopyMode && interop::Blender::usesAlphaBlend(diagOtherMode);
+                            const uint32_t diagCvgDst = diagOtherMode.cvgDst();
+                            static std::atomic<uint64_t> diagTotal = { 0 };
+                            static std::atomic<uint64_t> diagWrapBlend = { 0 };
+                            static std::atomic<uint64_t> diagWrapPlain = { 0 };
+                            static std::atomic<uint64_t> diagSaveBlend = { 0 };
+                            static std::atomic<uint64_t> diagSavePlain = { 0 };
+                            if (diagCvgDst == CVG_DST_WRAP) {
+                                if (diagAlphaBlend) diagWrapBlend++; else diagWrapPlain++;
+                            }
+                            else if (diagCvgDst == CVG_DST_SAVE) {
+                                if (diagAlphaBlend) diagSaveBlend++; else diagSavePlain++;
+                            }
+
+                            // Print on a draw count rather than a timer so the cadence is identical
+                            // between runs and two runs can be compared directly.
+                            const uint64_t diagCount = ++diagTotal;
+                            if ((diagCount % 50000) == 0) {
+                                fprintf(stderr, "[cvgdiag] draws=%llu wrap=%llu(blend %llu/plain %llu) save=%llu(blend %llu/plain %llu)\n",
+                                    (unsigned long long)(diagCount),
+                                    (unsigned long long)(diagWrapBlend + diagWrapPlain),
+                                    (unsigned long long)(diagWrapBlend),
+                                    (unsigned long long)(diagWrapPlain),
+                                    (unsigned long long)(diagSaveBlend + diagSavePlain),
+                                    (unsigned long long)(diagSaveBlend),
+                                    (unsigned long long)(diagSavePlain));
+                            }
+                        }
+#                   endif
 
                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
                         if (gpuShader != nullptr) {
