@@ -264,10 +264,23 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // one output, so the blending factor has to travel in its alpha and the pipeline blends
     // with SRC_ALPHA/INV_SRC_ALPHA instead of the SRC1 factors. That costs us the coverage
     // value the primary output would otherwise carry, so coverage written to the framebuffer
-    // is wrong for alpha blended draws. Keep this in sync with RasterShader::createPipeline.
+    // is wrong wherever the factor takes its place. Keep in sync with RasterShader::createPipeline.
+    //
+    // The condition MUST match whether the bound pipeline actually enabled blending, because
+    // resultAlpha carries the neutral factor 1.0f whenever alphaBlend is false:
+    //   - Ubershaders (DYNAMIC_RENDER_PARAMS) hardcode PipelineCreation::alphaBlend = true, so
+    //     blending is ALWAYS on while the shader decides per draw. The factor must therefore
+    //     always be written; writing coverage instead would blend live geometry at ~8/255
+    //     opacity (or 0 under CVG_DST_SAVE, i.e. invisible).
+    //   - Specialized shaders derive PipelineCreation::alphaBlend from the same predicate used
+    //     here, so blending is off when alphaBlend is false and coverage must be preserved.
+#   ifdef DYNAMIC_RENDER_PARAMS
+    resultColor.a = resultAlpha.a;
+#   else
     if (alphaBlend) {
         resultColor.a = resultAlpha.a;
     }
+#   endif
 #endif
 
     return true;

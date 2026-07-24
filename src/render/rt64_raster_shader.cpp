@@ -361,8 +361,14 @@ namespace RT64 {
         // Devices that do not support dual source blending (every Mali GPU, some older desktop drivers) get a
         // fallback instead: the NO_DUAL_SRC_BLEND shader variant writes the blending factor into the primary
         // output's alpha and we blend against that. The tradeoff is that the coverage value the primary output
-        // would normally carry is lost for alpha blended draws, so coverage based effects are inaccurate there.
-        // Without this the pipeline is invalid and drivers are free to render garbage, which is what Mali does.
+        // would normally carry is lost wherever the factor takes its place, so coverage based effects are
+        // inaccurate there. Without this the pipeline is invalid and drivers are free to render garbage,
+        // which is what Mali does.
+        //
+        // NOTE: the shader decides whether to write the factor from whether blending is enabled here, so the
+        // two must stay in agreement. The specialized path below sets alphaBlend from the same predicate the
+        // shader uses, but RasterShaderUber hardcodes it to true -- the shader's DYNAMIC_RENDER_PARAMS branch
+        // covers that by always writing the factor. Changing either side requires changing the other.
         const bool dualSrcBlend = c.device->getCapabilities().dualSrcBlend;
         RenderBlendDesc &targetBlend = pipelineDesc.renderTargetBlend[0];
         if (c.alphaBlend) {
