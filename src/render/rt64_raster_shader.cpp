@@ -103,9 +103,16 @@ namespace RT64 {
     {
         assert(device != nullptr);
 
+        // Only the SPIR-V permutations ship a NO_DUAL_SRC_BLEND variant. The DXIL and MSL ones always
+        // emit the secondary output, so they are only correct on a device that supports dual source
+        // blending -- which holds because plume hardcodes the capability to true on D3D12 and Metal
+        // and only queries it on Vulkan. If that ever changes, those backends need a fallback too.
+        assert((shaderFormat == RenderShaderFormat::SPIRV || device->getCapabilities().dualSrcBlend) &&
+            "Only the SPIR-V shaders have a fallback for devices without dual source blending.");
+
         this->device = device;
         this->desc = desc;
-        
+
         const bool useMSAA = (multisampling.sampleCount > 1);
         std::unique_ptr<RenderShader> vertexShader;
         std::unique_ptr<RenderShader> pixelShader;
@@ -446,6 +453,10 @@ namespace RT64 {
 
     RasterShaderUber::RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount) {
         assert(device != nullptr);
+
+        // Same coupling as in RasterShader: only the SPIR-V blobs below have a NO_DUAL_SRC_BLEND variant.
+        assert((shaderFormat == RenderShaderFormat::SPIRV || device->getCapabilities().dualSrcBlend) &&
+            "Only the SPIR-V shaders have a fallback for devices without dual source blending.");
 
         // Create the shaders.
         const void *VSBlob = nullptr;
