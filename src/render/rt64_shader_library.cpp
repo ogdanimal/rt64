@@ -5,6 +5,7 @@
 #include "rt64_shader_library.h"
 
 #include "common/rt64_common.h"
+#include "rhi/rt64_render_hooks.h"
 #include "shared/rt64_render_target_copy.h"
 #include "shared/rt64_rsp_vertex_test_z.h"
 
@@ -599,7 +600,7 @@ namespace RT64 {
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = regularShader.get();
-            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // TODO: Use whatever format the swap chain was created with.
+            pipelineDesc.renderTargetFormat[0] = GetSwapChainFormat();
             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             pipelineDesc.renderTargetCount = 1;
             pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();
