@@ -6,6 +6,7 @@
 
 #include "rt64_native_target.h"
 
+#include "common/rt64_device_workarounds.h"
 #include "gbi/rt64_f3d.h"
 #include "shared/rt64_fb_common.h"
 
@@ -197,7 +198,13 @@ namespace RT64 {
         worker->commandList->setComputeDescriptorSet(readBuffer.readDescSet->get(), 0);
         worker->commandList->setComputeDescriptorSet(emptyFbChange.readChangesSet->get(), 1);
         worker->commandList->setComputePushConstants(0, &nativeCB);
-        worker->commandList->dispatch(dispatchX, dispatchY, 1);
+        // RAM -> native. Gated together with the native -> RAM dispatch in
+        // copyToNative: skipping only one of the two moves the driver crash to the
+        // other rather than avoiding it (measured on an Adreno 630, not predicted).
+        // See rt64_device_workarounds.h.
+        if (GetFramebufferSyncEnabled()) {
+            worker->commandList->dispatch(dispatchX, dispatchY, 1);
+        }
         worker->commandList->barriers(RenderBarrierStage::ALL, afterBarriers, uint32_t(std::size(afterBarriers)));
 
         if (hasCurrentResource) {
@@ -343,7 +350,12 @@ namespace RT64 {
         worker->commandList->setComputePushConstants(0, &nativeCB);
         worker->commandList->setComputeDescriptorSet(writeBuffer.writeDescSet->get(), 0);
         worker->commandList->setComputeDescriptorSet(srcTarget->fbWriteDescSet->get(), 1);
-        worker->commandList->dispatch(dispatchX, dispatchY, 1);
+        // Native -> RAM. See the matching gate in copyFromRAM: both must be gated
+        // together, and only the dispatch is skipped -- the barriers and readback
+        // copies below still run, which is the configuration that was measured.
+        if (GetFramebufferSyncEnabled()) {
+            worker->commandList->dispatch(dispatchX, dispatchY, 1);
+        }
 
         RenderBufferBarrier copyBarriers[] = {
             RenderBufferBarrier(readBuffer->nativeBuffer.get(), RenderBufferAccess::READ),
