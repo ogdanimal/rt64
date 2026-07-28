@@ -36,13 +36,24 @@ function(preprocess INFILE OUTFILE OPTIONS)
 endfunction()
 
 if (WIN32)
-    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
     add_compile_definitions(NOMINMAX)
 
     # Dependencies that must be next to the DLL.
     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
     configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxil.dll" "dxil.dll" COPYONLY)
-elseif (APPLE)
+endif()
+
+# DXC is a build-time host tool -- it turns HLSL into DXIL and SPIR-V during the
+# build and no part of it ships -- so it is selected by the HOST, exactly as the
+# comment in the last branch below already argues for the target architecture.
+# Selecting it by target instead breaks a Windows build cross-compiled from WSL
+# twice over: dxc.exe is checked out without the executable bit, so exec fails
+# with 126, and once that is fixed the Windows process cannot open the Linux
+# absolute paths the build passes it. dxc-linux emits DXIL perfectly well; what
+# it cannot do is SIGN it, which only matters to a D3D12 device at runtime.
+if (CMAKE_HOST_WIN32)
+    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+elseif (CMAKE_HOST_APPLE)
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
         # find zlib and include in dyld path
         find_library(ZLIB_LIBRARY NAMES z)
@@ -71,12 +82,18 @@ set(ZSTD_BUILD_STATIC ON)
 set(ZSTD_BUILD_SHARED OFF)
 
 # file_to_c is a build-time host tool (embeds shader blobs into C arrays). When
-# cross-compiling for Android, building it with the NDK would produce an arm64
-# binary that cannot run on the build host, so instead use a prebuilt host
-# binary supplied via -DRT64_FILE_TO_C=/path/to/file_to_c.
-if (ANDROID)
+# cross-compiling, building it with the target toolchain produces a binary that
+# cannot run on the build host, so instead use a prebuilt host binary supplied
+# via -DRT64_FILE_TO_C=/path/to/file_to_c.
+#
+# Keyed on CMAKE_CROSSCOMPILING rather than ANDROID, because Android is not the
+# only cross-compile that reaches here: a Windows target built from WSL with
+# clang-cl hits it too. There it fails less obviously than on Android -- WSL's
+# binfmt interop WILL execute the resulting .exe, so the tool runs and then
+# cannot open any of the Linux absolute paths the build hands it.
+if (CMAKE_CROSSCOMPILING)
     if (NOT RT64_FILE_TO_C)
-        message(FATAL_ERROR "Cross-compiling for Android requires -DRT64_FILE_TO_C pointing at a host-built file_to_c binary.")
+        message(FATAL_ERROR "Cross-compiling requires -DRT64_FILE_TO_C pointing at a host-built file_to_c binary.")
     endif()
     set(FILE_TO_C "${RT64_FILE_TO_C}")
     set(FILE_TO_C_DEP "${RT64_FILE_TO_C}")
