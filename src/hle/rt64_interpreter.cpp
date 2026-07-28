@@ -166,10 +166,38 @@ namespace RT64 {
         state->checkRDRAM();
 
         // Run the command interpreter.
+        //
+        // The walk below ends only when a command sets `dl` to null -- a
+        // G_ENDDL. Nothing else bounds it: there is no command limit, no
+        // address range check, and an unrecognised opcode logs and then
+        // advances rather than stopping. A list that never terminates, or whose
+        // pointer wanders out of the list and into data, therefore executes
+        // memory as commands forever, and every command it runs appends to the
+        // state's buffers on the way.
+        //
+        // That is not a slow frame, it is a hang plus a ~490 MB/s memory leak
+        // on the gfx thread, and it is what took the WSL VM down repeatedly
+        // while Hybrid Heaven sat wedged at its expansion pak screen. The gfx
+        // thread never returns here, so its action queue grows at the VI
+        // thread's 60 Hz while RSS climbs until the OOM killer fires.
+        //
+        // A real frame is thousands of commands, so this ceiling is orders of
+        // magnitude above any legitimate list and cannot truncate valid
+        // content. Stopping abandons one frame; not stopping loses the process.
+        constexpr uint64_t MaxDisplayListCommands = 1ULL << 20;
+        uint64_t commandCount = 0;
+
         DisplayList *dl = dlStart;
         uint8_t opCode;
         GBIFunction func;
         while (dl != nullptr) {
+            if (++commandCount > MaxDisplayListCommands) {
+                fprintf(stderr, "[rt64] display list at 0x%08X exceeded %llu commands without ending -- "
+                                "abandoning the frame (runaway display list)\n",
+                        dlStartAdddress, (unsigned long long)(MaxDisplayListCommands));
+                break;
+            }
+
             opCode = (dl->w0 >> 24);
 
             if ((extendedOpCode != 0) && (opCode == extendedOpCode)) {
