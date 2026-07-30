@@ -102,6 +102,13 @@ namespace RT64 {
         HardwareResolve hardwareResolve;
         bool idleWorkActive;
         bool developerMode;
+        // Host swap-chain vsync. Defaults to true, which is exactly what RT64
+        // did unconditionally before this field existed: plume's Vulkan swap
+        // chain calls setVsyncEnabled(true) on creation and nothing ever changed
+        // it afterwards. Turning it off selects VK_PRESENT_MODE_IMMEDIATE_KHR
+        // under Vulkan (only where the device reports support for it) and
+        // syncInterval 0 + DXGI_PRESENT_ALLOW_TEARING under D3D12.
+        bool vsync;
 
         UserConfiguration();
         void validate();

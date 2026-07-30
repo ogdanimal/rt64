@@ -333,6 +333,12 @@ namespace RT64 {
 
         swapChain = presentGraphicsWorker->commandQueue->createSwapChain(swapChainDesc);
 
+        // RenderSwapChainDesc carries no vsync field, so this must be applied to
+        // the object after creation. Vulkan's swap chain constructs itself with
+        // setVsyncEnabled(true), so this is a no-op in the default case and only
+        // does work when the user has turned vsync off.
+        swapChain->setVsyncEnabled(userConfig.vsync);
+
         // Before configuring multisampling, make sure the device actually supports it for the formats we'll use. If it doesn't, turn off antialiasing in the configuration.
         const RenderSampleCounts colorSampleCounts = device->getSampleCountsSupported(RenderTarget::colorBufferFormat(usesHDR));
         const RenderSampleCounts depthSampleCounts = device->getSampleCountsSupported(RenderTarget::depthBufferFormat());
@@ -740,6 +746,15 @@ namespace RT64 {
 
     void Application::updateUserConfig(bool discardFBs) {
         sharedQueueResources->setUserConfig(userConfig, discardFBs);
+
+        // Vsync is a property of the swap chain, not of the shared queue
+        // resources, so it has to be applied separately here. This only records
+        // the desired present mode: under Vulkan it takes effect when the
+        // present thread next sees needsResize() go true, which that call
+        // arranges by design (requiredPresentMode != createdPresentMode).
+        if (swapChain != nullptr) {
+            swapChain->setVsyncEnabled(userConfig.vsync);
+        }
     }
 
     void Application::updateEmulatorConfig() {

@@ -29,6 +29,7 @@ namespace RT64 {
         j["hardwareResolve"] = cfg.hardwareResolve;
         j["idleWorkActive"] = cfg.idleWorkActive;
         j["developerMode"] = cfg.developerMode;
+        j["vsync"] = cfg.vsync;
     }
 
     void from_json(const json &j, UserConfiguration &cfg) {
@@ -52,6 +53,9 @@ namespace RT64 {
         cfg.hardwareResolve = j.value("hardwareResolve", defaultCfg.hardwareResolve);
         cfg.idleWorkActive = j.value("idleWorkActive", defaultCfg.idleWorkActive);
         cfg.developerMode = j.value("developerMode", defaultCfg.developerMode);
+        // Absent from an existing config file -> the default (on), so upgrading
+        // does not silently turn vsync off for anyone.
+        cfg.vsync = j.value("vsync", defaultCfg.vsync);
     }
 
     template <typename T>
@@ -83,6 +87,7 @@ namespace RT64 {
         hardwareResolve = HardwareResolve::Automatic;
         idleWorkActive = true;
         developerMode = false;
+        vsync = true;
     }
 
     void UserConfiguration::validate() {
