@@ -1464,6 +1464,74 @@ namespace RT64 {
         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
         const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
+
+        // HH: A FRAME THAT DRAWS NO TRANSFORMED GEOMETRY IS A 2D SCREEN, and every rect in
+        // it belongs to one picture, so they all have to be scaled the same way. The rule
+        // further down is written for a HUD over a 3D scene: a rect whose slice spans the
+        // scissor is a background and gets stretched to the widened frame, anything
+        // narrower keeps its native size centred. Hybrid Heaven's logo screens are built
+        // from two layers of texture tiles -- a full-width one and a middle-of-the-screen
+        // one -- so that rule scales the two layers differently and tears the picture
+        // apart. Measured on the Konami screen: 193 tiles stretched (inv=1.000) against
+        // 110 tiles centred (inv=0.750), one image. The reported symptom was the two
+        // layers pulling away from each other -- a dashed border and stray black blocks
+        // around a logo that was itself the right shape.
+        //
+        // `HH_2D_ASPECT` picks what a 2D screen does: `stretch` (the default) puts every
+        // rect on the background rule, so the 4:3 art fills the widened frame; `native`
+        // puts every rect on the sprite rule, so the art keeps its proportions and the
+        // frame's own clear fills the sides; `legacy` restores RT64's per-slice decision
+        // exactly, which is the A/B for this whole block.
+        enum class HH2DAspect { Legacy, Stretch, Native };
+        static const HH2DAspect hh2DAspect = [] {
+            const char* mode = getenv("HH_2D_ASPECT");
+            if (mode == nullptr) {
+                return HH2DAspect::Stretch;
+            }
+            if (strcmp(mode, "native") == 0) {
+                return HH2DAspect::Native;
+            }
+            if (strcmp(mode, "stretch") == 0) {
+                return HH2DAspect::Stretch;
+            }
+            return HH2DAspect::Legacy;
+        }();
+
+        // The whole WORKLOAD has to be free of geometry, not just this framebuffer pair.
+        // In gameplay the game submits a rect-only pair and a geometry pair in the same
+        // frame, so a per-pair test would call the rect-only half of every gameplay frame
+        // a 2D screen and re-scale the HUD with it. Measured: pair-only fires on 1232 of
+        // 1242 passes, workload-wide fires on the logo screens and nothing else.
+        bool hh2DScreen = (hh2DAspect != HH2DAspect::Legacy) && (p.curWorkload != nullptr);
+        for (uint32_t hhPair = 0; (p.curWorkload != nullptr) && (hhPair < p.curWorkload->fbPairCount) && hh2DScreen; hhPair++) {
+            const FramebufferPair &hhFbPair = p.curWorkload->fbPairs[hhPair];
+            for (uint32_t hhProj = 0; hhProj < hhFbPair.projectionCount && hh2DScreen; hhProj++) {
+                const Projection &hhProjection = hhFbPair.projections[hhProj];
+                const bool transformed = (hhProjection.type == Projection::Type::Perspective) ||
+                                         (hhProjection.type == Projection::Type::Orthographic);
+                if (transformed && (hhProjection.gameCallCount > 0)) {
+                    hh2DScreen = false;
+                }
+            }
+        }
+
+        // HH: the exposure measure. How much of a run this rule speaks for at all -- the
+        // rest of the game reaches the `else` and renders exactly as it did before.
+        static const bool hhTrace2D = (getenv("HH_TRACE_2D_ASPECT") != nullptr);
+        if (hhTrace2D) {
+            static uint64_t twoD = 0, seen = 0;
+            static bool wasTwoD = false;
+            seen++;
+            if (hh2DScreen) {
+                twoD++;
+            }
+            if (hh2DScreen != wasTwoD) {
+                wasTwoD = hh2DScreen;
+                fprintf(stderr, "[2d] pass=%llu %s a 2D screen (%llu/%llu passes so far)\n",
+                    (unsigned long long)seen - 1, hh2DScreen ? "->" : "<- no longer",
+                    (unsigned long long)twoD, (unsigned long long)seen);
+            }
+        }
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
         uint32_t globalCallIndex = 0;
@@ -1759,6 +1827,18 @@ namespace RT64 {
                             }
                             else {
                                 horizontalMisalignment = p.horizontalMisalignment;
+                            }
+
+                            // HH: one picture, one scale. See the note where `hh2DScreen`
+                            // is computed.
+                            if (hh2DScreen) {
+                                if (hh2DAspect == HH2DAspect::Stretch) {
+                                    invRatioScale = 1.0f;
+                                    horizontalMisalignment = 0.0f;
+                                }
+                                else {
+                                    invRatioScale = 1.0f / aspectRatioScale;
+                                }
                             }
 
                             RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
