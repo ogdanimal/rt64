@@ -160,7 +160,16 @@ namespace RT64 {
         };
 
         std::array<Present, 3> history;
-        std::array<uint32_t, 3> factors;
+
+        // Hybrid Heaven fork: widened from upstream's 3, and read differently.
+        // The cadence this samples jitters +/-1 VI symmetrically -- measured in
+        // gameplay as 1s and 3s in near-equal number (50 and 47) around a mean
+        // of 1.99 -- so three samples cannot characterise it, and upstream's
+        // exact-agreement rule finds all three slots disagreeing up to 64% of
+        // the time. `history` stays at 3; `factors` is read by exactly one
+        // function. See logicalRateFromFactors.
+        static constexpr size_t FactorCount = 8;
+        std::array<uint32_t, FactorCount> factors;
         int historyCursor;
         int factorCursor;
 
@@ -170,4 +179,9 @@ namespace RT64 {
         uint32_t logicalRateFromFactors();
         const Present &top() const;
     };
+
+    // Hybrid Heaven fork: reports the rate rule logicalRateFromFactors actually
+    // branched on, so a log can state its own arm instead of the harness
+    // assuming the switch crossed into the process.
+    bool usingLegacyViRate();
 };

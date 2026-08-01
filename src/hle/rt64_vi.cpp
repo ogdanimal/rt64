@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <memory.h>
 #include <stdio.h>
 
@@ -161,14 +162,104 @@ namespace RT64 {
         factors[factorCursor] = factor;
     }
 
+    // Hybrid Heaven fork patch -- NOT to be offered upstream, by decision.
+    //
+    // Upstream requires every slot of a three-entry ring to agree exactly, and
+    // returns 0 otherwise. Zero is not "unknown, carry on": it makes
+    // `displayRateAboveOriginal` false in rt64_workload_queue.cpp, so
+    // `generateInterpolatedFrames` is false, so `displayFrames` stays at its
+    // initialiser of 1 and interpolation stops outright. The presented rate then
+    // collapses to the game's own -- measured on Hybrid Heaven as 75 -> 53 fps
+    // for 8-12 seconds at a stretch, while the game kept delivering frames at
+    // its normal rate and every RT64 stage cost exactly what it had. It reads as
+    // a performance problem and is not one.
+    //
+    // WHAT THE CADENCE ACTUALLY LOOKS LIKE -- measured, after a first attempt at
+    // this fix was built on a guess and failed:
+    //
+    //   fps    ring composition                  factor histogram
+    //   68.9   uniform 62% pair 20% scattered 18%   1:12  2:161  3:10
+    //   55.5   uniform  7% pair 37% scattered 57%   1:50  2: 82  3:48
+    //   52.3   uniform  5% pair 31% scattered 64%   1:50  2: 86  3:47
+    //
+    // The signal jitters +/-1 VI in BOTH directions and near-symmetrically -- the
+    // 1s and 3s arrive in equal number, so no frames are being lost -- and the
+    // mean stays pinned at 1.98-1.99 while the scatter grows and the framerate
+    // falls. The cadence information is intact; upstream's rule discards it by
+    // demanding exact agreement among three samples of a noisy signal. All three
+    // slots disagree up to 64% of the time, which is why a majority vote (the
+    // first attempt here) could not work either: it only reaches the `pair` case.
+    //
+    // So: take the ROUNDED MEAN over a wider window. That is the estimator the
+    // measurement asks for -- symmetric zero-mean noise averages out exactly --
+    // and it still tracks genuine rates rather than assuming 30, which matters
+    // because the game really does run at 60 in places (a boot segment measured
+    // a clean 1:183, mean factor 1.000).
+    //
+    // HH_RT64_LEGACY_VI_RATE=1 restores upstream's rule exactly, including
+    // examining only the three most recent samples.
+    // Which rule this build actually took, for the log to state rather than the
+    // harness to assume. A switch that fails to cross the WSL boundary produces a
+    // run indistinguishable from one where the switch did nothing -- so the arm
+    // has to be read out of the code that branches on it, not out of the script
+    // that meant to set it.
+    static const bool viRateLegacy = (getenv("HH_RT64_LEGACY_VI_RATE") != nullptr);
+
+    bool usingLegacyViRate() {
+        return viRateLegacy;
+    }
+
     uint32_t VIHistory::logicalRateFromFactors() {
-        if ((factors[0] != 0) && std::all_of(factors.begin(), factors.end(), [&](uint32_t factor) { return factor == factors[0]; })) {
-            const uint32_t FullRate = 60; // TODO: PAL support.
-            return FullRate / factors[0];
+        const uint32_t FullRate = 60; // TODO: PAL support.
+
+        const bool legacy = viRateLegacy;
+        if (legacy) {
+            // Upstream saw a ring of three. Read the three most recent entries so
+            // this arm is a faithful control and not a stricter rule over eight.
+            uint32_t recent[3];
+            for (int i = 0; i < 3; i++) {
+                const int index = ((factorCursor - i) % int(FactorCount) + int(FactorCount)) % int(FactorCount);
+                recent[i] = factors[index];
+            }
+
+            if ((recent[0] != 0) && (recent[1] == recent[0]) && (recent[2] == recent[0])) {
+                return FullRate / recent[0];
+            }
+            else {
+                return 0;
+            }
         }
-        else {
+
+        // Mean of the populated slots. A zero means "never written" -- the ring
+        // is still filling after a reset -- and must not be averaged in, or the
+        // estimate is dragged toward a rate no frame ever ran at.
+        uint32_t sum = 0;
+        uint32_t populated = 0;
+        for (uint32_t factor : factors) {
+            if (factor != 0) {
+                sum += factor;
+                populated++;
+            }
+        }
+
+        // Refuse to guess from a nearly empty ring. Below this the mean is not a
+        // measurement, and answering would interpolate against a number the game
+        // has not demonstrated.
+        constexpr uint32_t MinimumSamples = 4;
+        if (populated < MinimumSamples) {
             return 0;
         }
+
+        // Round to nearest: the noise is symmetric, so the true factor is the
+        // nearest integer to the mean, not the floor of it. Integer arithmetic --
+        // (sum + populated/2) / populated -- to keep this free of float rounding
+        // on a path taken every frame.
+        const uint32_t factor = (sum + (populated / 2)) / populated;
+        if (factor == 0) {
+            return 0;
+        }
+
+        return FullRate / factor;
     }
 
     const VIHistory::Present &VIHistory::top() const {
